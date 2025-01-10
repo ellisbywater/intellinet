@@ -4,6 +4,7 @@ use std::{fs, thread};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use notify_rust::Notification;
+use pcap::Device;
 use pnet::packet::ethernet::EthernetPacket;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::Packet;
@@ -36,12 +37,14 @@ struct IpStats {
 }
 
 fn main() {
-    let interface = "eth0";
+    let interface = Device::lookup().unwrap().unwrap();
+    println!("Found device::>  {}", interface.name);
+    println!("Possible Devices::> {:#?}", Device::list());
     let config_content = fs::read_to_string("intellinet.config.toml").unwrap();
-    let config = toml::from_str(&config_content).unwrap();
+    let config: Config = toml::from_str(&config_content).unwrap();
 
     // Open the capture for the given interface
-    let mut cap = pcap::Capture::from_device(interface).unwrap()
+    let mut cap = pcap::Capture::from_device("any").unwrap()
         .promisc(true)
         .snaplen(5000)
         .open().unwrap();
@@ -59,40 +62,45 @@ fn main() {
         }
     );
     loop {
-        if let Ok(packet) = cap.next() {
-            println!("Received packet of length {}", packet.header.len());
+        if let Ok(packet) = cap.next_packet() {
+            println!("Received packet of length {}", packet.header.len);
             if let Some(ethernet_packet) = EthernetPacket::new(&packet.data) {
                 println!("Ethernet packet: {:?}", ethernet_packet);
-                match ethernet_packet.get_ethertype() {
-                    IpNextHeaderProtocols::Tcp => {
-                        let tcp_packet = TcpPacket::new(ethernet_packet.payload());
-                        if let Some(tcp_packet) = tcp_packet {
-                            println!(
-                                "TCP Packet: {}:{} > {}:{}; Seq: {}, Ack: {}",
-                                ethernet_packet.get_source(),
-                                tcp_packet.get_source(),
-                   q             ethernet_packet.get_destination(),
-                                tcp_packet.get_destination(),
-                                tcp_packet.get_sequence(),
-                                tcp_packet.get_acknowledgement()
-                            );
-                        }
-                    },
-                    IpNextHeaderProtocols::Udp => {
-                        let udp_packet = UdpPacket::new(ethernet_packet.payload());
-                        if let Some(udp_packet) = udp_packet {
-                            println!(
-                                "UDP Packet: {}:{} > {}:{}; Len: {}",
-                                ethernet_packet.get_source(),
-                                udp_packet.get_source(),
-                                ethernet_packet.get_destination(),
-                                udp_packet.get_destination(),
-                                udp_packet.get_length()
-                            );
-                        }
-                    },
-                    _ => {},
-                }
+                let src_ip = ethernet_packet.get_source().to_string();
+                let dst_ip = ethernet_packet.get_destination().to_string();
+                update_ip_stats(&mut shared_ip_map.lock().unwrap(), src_ip, true, packet.header.len);
+                update_ip_stats(&mut shared_ip_map.lock().unwrap(), dst_ip, false, packet.header.len);
+                // match ethernet_packet.get_ethertype() {
+                //
+                //     IpNextHeaderProtocols::Tcp => {
+                //         let tcp_packet = TcpPacket::new(ethernet_packet.payload());
+                //         if let Some(tcp_packet) = tcp_packet {
+                //             println!(
+                //                 "TCP Packet: {}:{} > {}:{}; Seq: {}, Ack: {}",
+                //                 ethernet_packet.get_source(),
+                //                 tcp_packet.get_source(),
+                //                 ethernet_packet.get_destination(),
+                //                 tcp_packet.get_destination(),
+                //                 tcp_packet.get_sequence(),
+                //                 tcp_packet.get_acknowledgement()
+                //             );
+                //         }
+                //     },
+                //     IpNextHeaderProtocols::Udp => {
+                //         let udp_packet = UdpPacket::new(ethernet_packet.payload());
+                //         if let Some(udp_packet) = udp_packet {
+                //             println!(
+                //                 "UDP Packet: {}:{} > {}:{}; Len: {}",
+                //                 ethernet_packet.get_source(),
+                //                 udp_packet.get_source(),
+                //                 ethernet_packet.get_destination(),
+                //                 udp_packet.get_destination(),
+                //                 udp_packet.get_length()
+                //             );
+                //         }
+                //     },
+                //     _ => {},
+                // }
             }
         }
     }
@@ -119,6 +127,8 @@ fn send_alert(ip: &str, port: u16) {
 fn display_summary(ip_map: &mut HashMap<String, IpStats>) {
     let terminal = terminal::stdout();
     terminal.act(Action::ClearTerminal(Clear::All)).unwrap();
+
+    println!("Packets total: {}", ip_map.len());
     println!("IP Address        | Packets Sent | Packets Received");
     println!("------------------+--------------+-----------------");
     for (ip, stats) in ip_map {
